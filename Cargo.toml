@@ -1,0 +1,31 @@
+[package]
+name = "randomuser"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "randomuser"
+path = "src/main.rs"
+
+[lib]
+name = "randomuser"
+path = "src/lib.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yml = "0.0.12"
+csv = "1"
+rand_mt = "4"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unidecode = "0.3"
+rand = "0.8"
