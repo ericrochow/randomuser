@@ -54,6 +54,17 @@ pub struct GenerateOptions {
     pub max_results: usize,
 }
 
+/// Returns true if `name` is safe to embed as a JSONP callback identifier.
+/// Accepts ASCII letters, digits, `_`, `$`, and `.` (for namespaced callbacks
+/// like `MyApp.callback`), up to 128 characters.
+pub fn is_safe_callback(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+}
+
 impl Generator {
     pub fn new(version: &'static str) -> Self {
         Self {
@@ -62,8 +73,13 @@ impl Generator {
         }
     }
 
+    pub fn version(&self) -> &'static str {
+        self.version
+    }
+
     pub fn init(&mut self, data_dir: &Path) -> std::io::Result<()> {
         self.datasets = NatDatasets::load(data_dir)?;
+        self.datasets.validate_required_lists()?;
         Ok(())
     }
 
@@ -156,7 +172,9 @@ impl Generator {
             _ => format_json(&resp, pretty),
         };
 
-        // JSONP wrapping
+        // JSONP wrapping — only applied when the callback has already been
+        // validated by the caller (is_safe_callback). Unsafe callbacks are
+        // rejected at the route layer before generate() is ever called.
         if let Some(cb) = &opts.callback {
             if out.ext == "json" {
                 out.body = format!("{}({});", cb, out.body);
@@ -483,6 +501,8 @@ fn parse_length(s: &str) -> (usize, usize) {
     }
 }
 
+// Intentionally uses the live clock so that the same seed produces an
+// up-to-date age value on each call, matching the behaviour of the original.
 fn age_years(dt: DateTime<Utc>) -> i64 {
     let now = Utc::now();
     let years = now.year() as i64 - dt.year() as i64;

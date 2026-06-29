@@ -1,5 +1,6 @@
 use super::{include_field, with_picture_reorder, NatDatasets};
 use crate::generator::prng::{pad, Prng};
+use chrono::Datelike;
 use serde_json::{json, Map, Value};
 
 fn check_digit(weights: &[i64], digits: &[i64]) -> i64 {
@@ -93,7 +94,6 @@ pub fn inject(
                 .map(|dt| dt.naive_utc().date());
 
             if let Some(dob) = dob_date {
-                use chrono::Datelike;
                 // DDMMYY in ISO order taken from date string
                 let birth_date_str = format!(
                     "{}{}{}",

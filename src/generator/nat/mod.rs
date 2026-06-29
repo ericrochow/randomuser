@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::HashMap,
     fs,
+    io,
     path::Path,
 };
 
@@ -73,6 +74,34 @@ impl NatDatasets {
 
     pub fn common_list<'a>(&'a self, key: &str) -> &'a [String] {
         self.common.get(key).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Verify that all list files required at request time are present.
+    /// Called once from `Generator::init` so missing data fails at startup
+    /// rather than producing a confusing panic inside a request handler.
+    pub fn validate_required_lists(&self) -> io::Result<()> {
+        const COMMON_REQUIRED: &[&str] = &["timezones", "user1", "user2", "passwords"];
+        const NAT_REQUIRED: &[&str] = &["cities", "states", "street", "male_first", "female_first", "last"];
+
+        for key in COMMON_REQUIRED {
+            if self.common_list(key).is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("required common list '{}' is missing or empty", key),
+                ));
+            }
+        }
+        for (nat, lists) in &self.by_nat {
+            for key in NAT_REQUIRED {
+                if lists.get(*key).map(|v| v.is_empty()).unwrap_or(true) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("required list '{}' for nat '{}' is missing or empty", key, nat),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// All nationality codes (excludes "common" and "LEGO").

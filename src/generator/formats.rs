@@ -4,6 +4,9 @@ pub struct FormatOutput {
     pub body: String,
     pub ext: &'static str,
     pub content_type: &'static str,
+    /// The number of results actually generated (after clamping); used by the
+    /// route handler so the stats record does not re-derive the clamped count.
+    pub resolved_results: usize,
 }
 
 /// Top-level response envelope.
@@ -52,6 +55,7 @@ pub fn format_json(resp: &ApiResponse, pretty: bool) -> FormatOutput {
         body,
         ext: "json",
         content_type: "application/json",
+        resolved_results: resp.results.len(),
     }
 }
 
@@ -62,6 +66,7 @@ pub fn format_yaml(resp: &ApiResponse) -> FormatOutput {
         body,
         ext: "yaml",
         content_type: "text/x-yaml",
+        resolved_results: resp.results.len(),
     }
 }
 
@@ -135,6 +140,7 @@ pub fn format_xml(resp: &ApiResponse) -> FormatOutput {
         body,
         ext: "xml",
         content_type: "text/xml",
+        resolved_results: resp.results.len(),
     }
 }
 
@@ -170,10 +176,13 @@ pub fn format_csv(resp: &ApiResponse) -> FormatOutput {
             body: String::new(),
             ext: "csv",
             content_type: "text/csv",
+            resolved_results: 0,
         };
     }
 
-    // Derive headers from the first result
+    // Derive headers from the first result. All results share the same field
+    // set because inc/exc is resolved once per request, so later rows will
+    // never have columns that the header row lacks.
     let mut headers: Vec<String> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
     flatten_value("", &Value::Object(resp.results[0].clone()), &mut pairs);
@@ -184,7 +193,7 @@ pub fn format_csv(resp: &ApiResponse) -> FormatOutput {
     }
 
     let mut wtr = csv::Writer::from_writer(vec![]);
-    wtr.write_record(&headers).ok();
+    wtr.write_record(&headers).expect("in-memory csv write");
 
     for user in resp.results {
         let mut row_pairs: Vec<(String, String)> = Vec::new();
@@ -195,7 +204,7 @@ pub fn format_csv(resp: &ApiResponse) -> FormatOutput {
             .iter()
             .map(|h| row_map.get(h).cloned().unwrap_or_default())
             .collect();
-        wtr.write_record(&row).ok();
+        wtr.write_record(&row).expect("in-memory csv write");
     }
 
     let body = String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default();
@@ -203,6 +212,7 @@ pub fn format_csv(resp: &ApiResponse) -> FormatOutput {
         body,
         ext: "csv",
         content_type: "text/csv",
+        resolved_results: resp.results.len(),
     }
 }
 

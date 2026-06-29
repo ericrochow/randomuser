@@ -29,3 +29,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unidecode = "0.3"
 rand = "0.8"
+dashmap = "5"
+mongodb = "3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"

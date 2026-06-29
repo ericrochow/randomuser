@@ -5,11 +5,17 @@ pub struct Prng {
     mt: Mt19937GenRand32,
 }
 
-impl Prng {
-    pub fn new() -> Self {
+impl Default for Prng {
+    fn default() -> Self {
         Self {
             mt: Mt19937GenRand32::new(0),
         }
+    }
+}
+
+impl Prng {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Seed from a user-supplied string + page number, mirroring the original seedRNG():
@@ -37,7 +43,7 @@ impl Prng {
     ///   mersenne.rand(max - min + 1) + min
     /// which is:  (mt.next_u32() % span) + min  (modulo reduction, same bias as JS impl)
     pub fn range(&mut self, min: i64, max: i64) -> i64 {
-        debug_assert!(max >= min);
+        assert!(max >= min, "Prng::range: max ({max}) must be >= min ({min})");
         if max == min {
             return min;
         }
@@ -47,7 +53,14 @@ impl Prng {
     }
 
     /// Pick a random element from a slice.
+    ///
+    /// Panics if `items` is empty — call sites are expected to validate their
+    /// data at startup (`Generator::init`) rather than at request time.
     pub fn random_item<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        assert!(
+            !items.is_empty(),
+            "random_item: slice is empty — ensure all required data files are present"
+        );
         let idx = self.range(0, (items.len() - 1) as i64) as usize;
         &items[idx]
     }
@@ -67,7 +80,7 @@ impl Prng {
             4 => b"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             5 => b"23456789",
             6 => b"abcdefghijklmnopqrstuvwxyz",
-            _ => panic!("invalid random mode {mode}"),
+            _ => unreachable!("random_chars called with invalid mode {mode}"),
         };
         (0..length)
             .map(|_| {

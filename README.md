@@ -24,11 +24,73 @@ cargo build --release
 cargo test
 ```
 
-This runs 91 tests: unit tests embedded in each source module plus 27 integration tests in `tests/api.rs`.
+This runs 99 tests: unit tests embedded in each source module plus 27 integration tests in `tests/api.rs`.
+
+## Configuration
+
+All configuration is via environment variables. Every variable is optional; defaults are shown below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | TCP port to listen on |
+| `DATA_DIR` | `data` | Path to the nationality data directory |
+| `MAX_RESULTS` | `5000` | Maximum results allowed per request |
+| `RATE_LIMIT` | `20000` | Max requests per IP per rate window |
+| `RATE_WINDOW_SECS` | `300` | Rate-limit window length in seconds |
+| `MONGODB_URI` | _(unset)_ | MongoDB connection string; stats are disabled when unset |
+| `RUST_LOG` | `randomuser=info` | Log filter (see below) |
+
+### MongoDB (optional)
+
+When `MONGODB_URI` is set, every API request is logged as a document in the `randomuser.requests` collection. If MongoDB is unreachable at startup, a warning is logged and the API continues serving normally — stats are simply not persisted.
+
+```sh
+# Run with MongoDB stats enabled
+MONGODB_URI=mongodb://localhost:27017 cargo run
+
+# Run without MongoDB (default)
+cargo run
+```
+
+Each request document has this shape:
+
+```json
+{
+  "ts": "2026-06-29T12:00:00Z",
+  "version": "1.4",
+  "results": 5,
+  "seed": "abc123",
+  "page": 1,
+  "nat": ["US", "GB"],
+  "inc": ["name", "email"],
+  "fmt": "json",
+  "ip": "127.0.0.1"
+}
+```
+
+### Rate limiting
+
+Requests are rate-limited per client IP using a fixed sliding window. When a client exceeds `RATE_LIMIT` requests within `RATE_WINDOW_SECS` seconds, the server returns HTTP 429:
+
+```json
+{
+  "error": "Whoa, ease up there cowboy. You've requested 20001 users in the last window. ..."
+}
+```
+
+Limits are tracked in memory and reset when the server restarts.
+
+### Log verbosity
+
+```sh
+RUST_LOG=debug cargo run    # verbose (request tracing)
+RUST_LOG=info  cargo run    # default (startup messages only)
+RUST_LOG=warn  cargo run    # silent unless something goes wrong
+```
 
 ## Running the server
 
-The server must be started from the project root because it loads the `data/` directory at runtime using a relative path:
+The server must be started from the project root because it loads the `data/` directory at runtime using a relative path (override with `DATA_DIR`):
 
 ```sh
 cd /path/to/randomuser
@@ -38,22 +100,13 @@ cargo run
 On startup you will see:
 
 ```
+INFO randomuser: MongoDB stats disabled (set MONGODB_URI to enable)
 INFO randomuser: Loading generator data from "data" …
 INFO randomuser: Loaded 21 nationalities: AU BR CA CH DE DK ES FI FR GB IE IN IR MX NL NO NZ RS TR UA US
 INFO randomuser: Listening on http://0.0.0.0:3000
 ```
 
 The server listens on port **3000** by default.
-
-### Log verbosity
-
-Set `RUST_LOG` to control output:
-
-```sh
-RUST_LOG=debug cargo run    # verbose (request tracing)
-RUST_LOG=info  cargo run    # default (startup messages only)
-RUST_LOG=warn  cargo run    # silent unless something goes wrong
-```
 
 ---
 
@@ -66,8 +119,10 @@ RUST_LOG=warn  cargo run    # silent unless something goes wrong
 | `GET` | `/api` | Generate users (latest version) |
 | `GET` | `/api/` | Same as above |
 | `GET` | `/api/1.4` | Versioned endpoint (currently identical behaviour) |
+| `GET` | `/stats` | JSON snapshot of accumulated request counts |
+| `GET` | `/stats/stream` | Server-Sent Events stream of live stats |
 
-All parameters are passed as query string arguments. All are optional.
+All `/api` parameters are passed as query string arguments. All are optional.
 
 ---
 
@@ -403,14 +458,55 @@ curl "http://localhost:3000/api?fmt=csv&results=500&dl=1" -o users.csv
 
 ---
 
+## Stats endpoints
+
+### `GET /stats`
+
+Returns a JSON snapshot of accumulated request counts since the server started.
+
+```sh
+curl http://localhost:3000/stats
+```
+
+```json
+{
+  "total_requests": 1042,
+  "by_nat": {
+    "US": 312,
+    "GB": 198,
+    "FR": 154
+  }
+}
+```
+
+### `GET /stats/stream`
+
+Server-Sent Events stream that pushes an updated snapshot after every API request. The connection is kept alive with a comment every 15 seconds during quiet periods.
+
+```sh
+curl -N http://localhost:3000/stats/stream
+```
+
+```
+event: stats
+data: {"total_requests":1043,"by_nat":{"US":313,"GB":198,"FR":154}}
+
+event: stats
+data: {"total_requests":1044,"by_nat":{"US":313,"GB":198,"FR":155}}
+```
+
+Stats are in-memory only unless `MONGODB_URI` is configured. Counts reset on server restart.
+
+---
+
 ## Project layout
 
 ```
 randomuser/
 ├── src/
-│   ├── main.rs               # Tokio + Axum server (port 3000)
+│   ├── main.rs               # Tokio + Axum server; wires state and routes
 │   ├── lib.rs                # Module declarations
-│   ├── config.rs             # Config struct with defaults
+│   ├── config.rs             # Config struct; Config::from_env()
 │   ├── generator/
 │   │   ├── mod.rs            # Generator struct; generate() entry point
 │   │   ├── prng.rs           # MT19937 wrapper; seeding, UUID, lat/lon
@@ -420,8 +516,12 @@ randomuser/
 │   │       ├── au.rs         # Australia
 │   │       ├── br.rs         # Brazil
 │   │       └── ...           # One file per nationality
+│   ├── stats/
+│   │   ├── mod.rs            # StatEvent, LiveStats, RateLimiter, StatsHandle
+│   │   └── mongo.rs          # Background MongoDB writer task
 │   └── routes/
-│       └── api.rs            # Axum handlers for /api and /api/:version
+│       ├── api.rs            # AppState; handlers for /api and /api/:version
+│       └── stats.rs          # Handlers for /stats and /stats/stream
 ├── tests/
 │   └── api.rs                # 27 integration tests
 ├── data/                     # Nationality data files (names, cities, etc.)
