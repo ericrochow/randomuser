@@ -43,6 +43,7 @@ All configuration is via environment variables. Every variable is optional; defa
 | `MONGODB_URI` | _(unset)_ | MongoDB connection string; requires `--features mongodb` at build time |
 | `TRUSTED_PROXY` | `0` | Set to `1`, `true`, or `yes` to trust `X-Forwarded-For` / `X-Real-IP` headers |
 | `BASE_URL` | _(unset)_ | Public URL of this deployment (e.g. `https://api.example.com`); sets the contact link and server entry in the OpenAPI spec |
+| `SITE_NAME` | _(unset)_ | Display name for the API title and contact in the Scalar docs (e.g. `My Random User API`) |
 | `RUST_LOG` | `randomuser=info` | Log filter (see below) |
 
 ### MongoDB (optional)

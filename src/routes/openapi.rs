@@ -201,13 +201,12 @@ pub struct ErrorResponse {
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "Randomuser.me API",
+        title = "Random User API",
         version = "1.4",
         description = "Generate random, realistic-looking user profiles for testing and prototyping.\n\n\
             All query parameters are optional. Responses are deterministic when `seed` is provided.\n\n\
             **Output formats:** `json` (default) · `pretty` · `xml` · `yaml` · `csv` — controlled by the `fmt` parameter.\n\n\
             **Nationalities:** AU BR CA CH DE DK ES FI FR GB IE IN IR MX NL NO NZ RS TR UA US",
-        contact(name = "Randomuser.me"),
         license(name = "Apache-2.0", url = "https://www.apache.org/licenses/LICENSE-2.0"),
     ),
     paths(
@@ -238,10 +237,6 @@ pub struct ErrorResponse {
         (name = "Generate", description = "Random user profile generation"),
         (name = "Stats",    description = "Live request statistics"),
     ),
-    external_docs(
-        url = "https://randomuser.me/documentation",
-        description = "Original Randomuser.me documentation",
-    ),
 )]
 pub struct ApiDoc;
 
@@ -249,15 +244,30 @@ pub struct ApiDoc;
 
 /// Returns an Axum router that serves the Scalar interactive docs at `/docs`.
 ///
-/// `base_url` — the public URL of this deployment (e.g. `https://api.example.com`).
-/// When provided it overrides the contact URL in the OpenAPI spec and adds a server
-/// entry so Scalar points try-it requests at the right host.
-pub fn docs_router<S: Clone + Send + Sync + 'static>(base_url: Option<&str>) -> Router<S> {
+/// `base_url` — public URL of this deployment; sets the OpenAPI server entry and
+/// contact URL so Scalar try-it requests target the right host.
+///
+/// `site_name` — display name for the API title and contact; defaults to
+/// `"Random User API"` when unset.
+pub fn docs_router<S: Clone + Send + Sync + 'static>(
+    base_url: Option<&str>,
+    site_name: Option<&str>,
+) -> Router<S> {
     let mut spec = ApiDoc::openapi();
+
+    if let Some(name) = site_name {
+        spec.info.title = name.to_string();
+    }
+
+    if base_url.is_some() || site_name.is_some() {
+        let contact = utoipa::openapi::ContactBuilder::new()
+            .name(site_name.map(str::to_string))
+            .url(base_url.map(str::to_string))
+            .build();
+        spec.info.contact = Some(contact);
+    }
+
     if let Some(url) = base_url {
-        if let Some(contact) = spec.info.contact.as_mut() {
-            contact.url = Some(url.to_string());
-        }
         spec.servers = Some(vec![
             utoipa::openapi::ServerBuilder::new()
                 .url(url)
@@ -265,5 +275,6 @@ pub fn docs_router<S: Clone + Send + Sync + 'static>(base_url: Option<&str>) -> 
                 .build(),
         ]);
     }
+
     Router::new().merge(Scalar::with_url("/docs", spec))
 }

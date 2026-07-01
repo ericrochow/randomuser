@@ -20,6 +20,8 @@ pub struct Config {
     /// Public base URL for this deployment (e.g. `https://api.example.com`).
     /// Used in the OpenAPI spec contact link and server entry; set BASE_URL.
     pub base_url: Option<String>,
+    /// Display name for the API title and contact in the OpenAPI spec; set SITE_NAME.
+    pub site_name: Option<String>,
 }
 
 impl Default for Config {
@@ -34,6 +36,7 @@ impl Default for Config {
             mongodb_uri: None,
             trusted_proxy: false,
             base_url: None,
+            site_name: None,
         }
     }
 }
@@ -52,6 +55,7 @@ impl Config {
     /// | MONGODB_URI       | mongodb_uri    | mongodb://localhost         |
     /// | TRUSTED_PROXY     | trusted_proxy  | 1                          |
     /// | BASE_URL          | base_url       | https://api.example.com    |
+    /// | SITE_NAME         | site_name      | My Random User API         |
     pub fn from_env() -> Self {
         Self::from_env_with(|k| std::env::var(k).ok())
     }
@@ -109,6 +113,11 @@ impl Config {
         if let Some(v) = env("BASE_URL") {
             if !v.is_empty() {
                 c.base_url = Some(v.trim_end_matches('/').to_string());
+            }
+        }
+        if let Some(v) = env("SITE_NAME") {
+            if !v.is_empty() {
+                c.site_name = Some(v);
             }
         }
 
@@ -196,5 +205,17 @@ mod tests {
     fn from_env_with_empty_base_url_stays_none() {
         let c = Config::from_env_with(env_map(&[("BASE_URL", "")]));
         assert!(c.base_url.is_none());
+    }
+
+    #[test]
+    fn from_env_with_site_name() {
+        let c = Config::from_env_with(env_map(&[("SITE_NAME", "My API")]));
+        assert_eq!(c.site_name.as_deref(), Some("My API"));
+    }
+
+    #[test]
+    fn from_env_with_empty_site_name_stays_none() {
+        let c = Config::from_env_with(env_map(&[("SITE_NAME", "")]));
+        assert!(c.site_name.is_none());
     }
 }
