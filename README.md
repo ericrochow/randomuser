@@ -42,6 +42,7 @@ All configuration is via environment variables. Every variable is optional; defa
 | `RATE_WINDOW_SECS` | `300` | Rate-limit window length in seconds |
 | `MONGODB_URI` | _(unset)_ | MongoDB connection string; requires `--features mongodb` at build time |
 | `TRUSTED_PROXY` | `0` | Set to `1`, `true`, or `yes` to trust `X-Forwarded-For` / `X-Real-IP` headers |
+| `BASE_URL` | _(unset)_ | Public URL of this deployment (e.g. `https://api.example.com`); sets the contact link and server entry in the OpenAPI spec |
 | `RUST_LOG` | `randomuser=info` | Log filter (see below) |
 
 ### MongoDB (optional)

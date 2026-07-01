@@ -17,6 +17,9 @@ pub struct Config {
     /// instead of the TCP peer address. Enable only when the server sits behind
     /// a trusted reverse proxy; set TRUSTED_PROXY=1.
     pub trusted_proxy: bool,
+    /// Public base URL for this deployment (e.g. `https://api.example.com`).
+    /// Used in the OpenAPI spec contact link and server entry; set BASE_URL.
+    pub base_url: Option<String>,
 }
 
 impl Default for Config {
@@ -30,6 +33,7 @@ impl Default for Config {
             data_dir: PathBuf::from("data"),
             mongodb_uri: None,
             trusted_proxy: false,
+            base_url: None,
         }
     }
 }
@@ -38,15 +42,16 @@ impl Config {
     /// Build config from environment variables, falling back to defaults.
     /// Invalid values are logged as warnings and the default is retained.
     ///
-    /// | Variable          | Field          | Example              |
-    /// |-------------------|----------------|----------------------|
-    /// | PORT              | port           | 3000                 |
-    /// | DATA_DIR          | data_dir       | /opt/randomuser/data |
-    /// | MAX_RESULTS       | max_results    | 5000                 |
-    /// | RATE_LIMIT        | rate_limit     | 20000                |
-    /// | RATE_WINDOW_SECS  | rate_window    | 300                  |
-    /// | MONGODB_URI       | mongodb_uri    | mongodb://localhost   |
-    /// | TRUSTED_PROXY     | trusted_proxy  | 1                    |
+    /// | Variable          | Field          | Example                    |
+    /// |-------------------|----------------|----------------------------|
+    /// | PORT              | port           | 3000                       |
+    /// | DATA_DIR          | data_dir       | /opt/randomuser/data       |
+    /// | MAX_RESULTS       | max_results    | 5000                       |
+    /// | RATE_LIMIT        | rate_limit     | 20000                      |
+    /// | RATE_WINDOW_SECS  | rate_window    | 300                        |
+    /// | MONGODB_URI       | mongodb_uri    | mongodb://localhost         |
+    /// | TRUSTED_PROXY     | trusted_proxy  | 1                          |
+    /// | BASE_URL          | base_url       | https://api.example.com    |
     pub fn from_env() -> Self {
         Self::from_env_with(|k| std::env::var(k).ok())
     }
@@ -100,6 +105,11 @@ impl Config {
         }
         if let Some(v) = env("TRUSTED_PROXY") {
             c.trusted_proxy = matches!(v.trim(), "1" | "true" | "yes");
+        }
+        if let Some(v) = env("BASE_URL") {
+            if !v.is_empty() {
+                c.base_url = Some(v.trim_end_matches('/').to_string());
+            }
         }
 
         c
@@ -168,5 +178,23 @@ mod tests {
         let c = Config::from_env_with(|_| None);
         assert_eq!(c.port, Config::default().port);
         assert_eq!(c.max_results, Config::default().max_results);
+    }
+
+    #[test]
+    fn from_env_with_base_url() {
+        let c = Config::from_env_with(env_map(&[("BASE_URL", "https://api.example.com")]));
+        assert_eq!(c.base_url.as_deref(), Some("https://api.example.com"));
+    }
+
+    #[test]
+    fn from_env_with_base_url_strips_trailing_slash() {
+        let c = Config::from_env_with(env_map(&[("BASE_URL", "https://api.example.com/")]));
+        assert_eq!(c.base_url.as_deref(), Some("https://api.example.com"));
+    }
+
+    #[test]
+    fn from_env_with_empty_base_url_stays_none() {
+        let c = Config::from_env_with(env_map(&[("BASE_URL", "")]));
+        assert!(c.base_url.is_none());
     }
 }

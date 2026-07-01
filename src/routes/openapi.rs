@@ -207,8 +207,8 @@ pub struct ErrorResponse {
             All query parameters are optional. Responses are deterministic when `seed` is provided.\n\n\
             **Output formats:** `json` (default) · `pretty` · `xml` · `yaml` · `csv` — controlled by the `fmt` parameter.\n\n\
             **Nationalities:** AU BR CA CH DE DK ES FI FR GB IE IN IR MX NL NO NZ RS TR UA US",
-        contact(name = "Randomuser.me", url = "https://randomuser.me"),
-        license(name = "MIT"),
+        contact(name = "Randomuser.me"),
+        license(name = "Apache-2.0", url = "https://www.apache.org/licenses/LICENSE-2.0"),
     ),
     paths(
         crate::routes::api::handle_latest,
@@ -248,6 +248,22 @@ pub struct ApiDoc;
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 /// Returns an Axum router that serves the Scalar interactive docs at `/docs`.
-pub fn docs_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    Router::new().merge(Scalar::with_url("/docs", ApiDoc::openapi()))
+///
+/// `base_url` — the public URL of this deployment (e.g. `https://api.example.com`).
+/// When provided it overrides the contact URL in the OpenAPI spec and adds a server
+/// entry so Scalar points try-it requests at the right host.
+pub fn docs_router<S: Clone + Send + Sync + 'static>(base_url: Option<&str>) -> Router<S> {
+    let mut spec = ApiDoc::openapi();
+    if let Some(url) = base_url {
+        if let Some(contact) = spec.info.contact.as_mut() {
+            contact.url = Some(url.to_string());
+        }
+        spec.servers = Some(vec![
+            utoipa::openapi::ServerBuilder::new()
+                .url(url)
+                .description(Some("This deployment"))
+                .build(),
+        ]);
+    }
+    Router::new().merge(Scalar::with_url("/docs", spec))
 }

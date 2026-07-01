@@ -86,7 +86,7 @@ async fn main() {
         .route("/api/:version", get(handle_versioned))
         .route("/stats", get(handle_stats_snapshot))
         .route("/stats/stream", get(handle_stats_stream))
-        .merge(docs_router())
+        .merge(docs_router(config.base_url.as_deref()))
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(state);
