@@ -16,6 +16,9 @@ cargo build
 
 # Optimised release build
 cargo build --release
+
+# With MongoDB stats persistence enabled
+cargo build --release --features mongodb
 ```
 
 ## Running the tests
@@ -24,7 +27,7 @@ cargo build --release
 cargo test
 ```
 
-This runs 99 tests: unit tests embedded in each source module plus 27 integration tests in `tests/api.rs`.
+This runs 127 tests: 97 unit tests embedded in each source module plus 30 integration tests in `tests/api.rs`.
 
 ## Configuration
 
@@ -37,16 +40,25 @@ All configuration is via environment variables. Every variable is optional; defa
 | `MAX_RESULTS` | `5000` | Maximum results allowed per request |
 | `RATE_LIMIT` | `20000` | Max requests per IP per rate window |
 | `RATE_WINDOW_SECS` | `300` | Rate-limit window length in seconds |
-| `MONGODB_URI` | _(unset)_ | MongoDB connection string; stats are disabled when unset |
+| `MONGODB_URI` | _(unset)_ | MongoDB connection string; requires `--features mongodb` at build time |
+| `TRUSTED_PROXY` | `0` | Set to `1`, `true`, or `yes` to trust `X-Forwarded-For` / `X-Real-IP` headers |
 | `RUST_LOG` | `randomuser=info` | Log filter (see below) |
 
 ### MongoDB (optional)
 
-When `MONGODB_URI` is set, every API request is logged as a document in the `randomuser.requests` collection. If MongoDB is unreachable at startup, a warning is logged and the API continues serving normally — stats are simply not persisted.
+MongoDB stats persistence is an **opt-in compile-time feature**. To enable it, build with `--features mongodb`:
 
 ```sh
-# Run with MongoDB stats enabled
-MONGODB_URI=mongodb://localhost:27017 cargo run
+cargo build --release --features mongodb
+```
+
+When `MONGODB_URI` is set at runtime and the feature is compiled in, every API request is logged as a document in the `randomuser.requests` collection. If MongoDB is unreachable at startup, a warning is logged and the API continues serving normally — stats are simply not persisted.
+
+If `MONGODB_URI` is set but the `mongodb` feature was not compiled in, the server logs a warning at startup and ignores the variable.
+
+```sh
+# Run with MongoDB stats enabled (binary must be built with --features mongodb)
+MONGODB_URI=mongodb://localhost:27017 ./target/release/randomuser
 
 # Run without MongoDB (default)
 cargo run
@@ -78,7 +90,11 @@ Requests are rate-limited per client IP using a fixed sliding window. When a cli
 }
 ```
 
-Limits are tracked in memory and reset when the server restarts.
+The rate-limiter map is capped at 1 000 000 distinct IPs. Expired entries are swept once per window by a background task; the cap also triggers a proactive sweep if reached between sweeps. Limits are tracked in memory and reset when the server restarts.
+
+### Trusted proxy
+
+When the server runs behind a reverse proxy (nginx, Caddy, etc.), set `TRUSTED_PROXY=1` so that rate limiting uses the real client IP from `X-Forwarded-For` rather than the proxy's address. Do **not** enable this unless the proxy is actually trusted — clients can spoof these headers to bypass rate limiting.
 
 ### Log verbosity
 
@@ -97,7 +113,15 @@ cd /path/to/randomuser
 cargo run
 ```
 
-On startup you will see:
+On startup you will see (default build, no `--features mongodb`):
+
+```
+INFO randomuser: Loading generator data from "data" …
+INFO randomuser: Loaded 21 nationalities: AU BR CA CH DE DK ES FI FR GB IE IN IR MX NL NO NZ RS TR UA US
+INFO randomuser: Listening on http://0.0.0.0:3000
+```
+
+With `--features mongodb` compiled in and no `MONGODB_URI` set:
 
 ```
 INFO randomuser: MongoDB stats disabled (set MONGODB_URI to enable)
@@ -121,6 +145,7 @@ The server listens on port **3000** by default.
 | `GET` | `/api/1.4` | Versioned endpoint (currently identical behaviour) |
 | `GET` | `/stats` | JSON snapshot of accumulated request counts |
 | `GET` | `/stats/stream` | Server-Sent Events stream of live stats |
+| `GET` | `/docs` | Interactive API documentation (Scalar UI) |
 
 All `/api` parameters are passed as query string arguments. All are optional.
 
@@ -134,8 +159,8 @@ Number of users to generate.
 
 - **Type:** integer
 - **Default:** `1`
-- **Max:** `5000`
-- Values outside `[1, 5000]` fall back to `1`
+- **Max:** `5000` (server default; configurable via `MAX_RESULTS`)
+- Values above the maximum are clamped to the maximum rather than falling back to 1
 
 ```sh
 curl "http://localhost:3000/api?results=10"
@@ -169,11 +194,12 @@ curl "http://localhost:3000/api?seed=foobar&results=5&page=2"
 
 Filter results to a single gender.
 
-- **Type:** `male` | `female`
-- **Default:** random mix
+- **Type:** `male` | `female` | `nonbinary`
+- **Default:** random mix (approximately 47.5 % male, 47.5 % female, 5 % nonbinary)
 
 ```sh
 curl "http://localhost:3000/api?gender=female&results=3"
+curl "http://localhost:3000/api?gender=nonbinary&results=3"
 ```
 
 #### `nat`
@@ -222,7 +248,7 @@ Comma-separated list of fields to **exclude**. Processed after `inc`; if both ar
 curl "http://localhost:3000/api?exc=picture,login"
 ```
 
-Available field names: `gender`, `name`, `location`, `email`, `login`, `registered`, `dob`, `phone`, `cell`, `id`, `picture`, `nat`
+Available field names: `gender`, `pronouns`, `name`, `location`, `email`, `login`, `registered`, `dob`, `phone`, `cell`, `id`, `picture`, `nat`
 
 #### `fmt` / `format`
 
@@ -298,7 +324,7 @@ curl "http://localhost:3000/api?lego=1&results=3"
 
 #### `callback`
 
-JSONP callback name. Wraps the JSON response in `callbackName(...);`. Only applies when the output format is JSON.
+JSONP callback name. Wraps the JSON response in `callbackName(...);`. Only applies when the output format is JSON. Must be a valid dot-separated JavaScript identifier (e.g. `MyApp.onData`); invalid names return HTTP 400.
 
 ```sh
 curl "http://localhost:3000/api?callback=myHandler"
@@ -324,6 +350,7 @@ curl "http://localhost:3000/api?fmt=csv&results=500&dl=1" -o users.csv
   "results": [
     {
       "gender": "female",
+      "pronouns": "she/her",
       "name": { "title": "Ms", "first": "Emily", "last": "Johnson" },
       "location": {
         "street": { "number": 4821, "name": "Maple Avenue" },
@@ -332,7 +359,7 @@ curl "http://localhost:3000/api?fmt=csv&results=500&dl=1" -o users.csv
         "country": "United States",
         "postcode": 62704,
         "coordinates": { "latitude": "41.8781", "longitude": "-87.6298" },
-        "timezone": { "offset": "-6:00", "description": "Central Time (US & Canada)" }
+        "timezone": { "offset": "-06:00", "description": "Central Time (US & Canada)" }
       },
       "email": "emily.johnson@example.com",
       "login": {
@@ -372,9 +399,10 @@ Fields appear in the canonical order shown above. The `info` block is omitted wh
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `gender` | string | `"male"` or `"female"` |
-| `name` | object | `title`, `first`, `last` |
-| `location` | object | `street` (number + name), `city`, `state`, `country`, `postcode`, `coordinates` (latitude + longitude), `timezone` (offset + description) |
+| `gender` | string | `"male"`, `"female"`, or `"nonbinary"` |
+| `pronouns` | string | `"he/him"`, `"she/her"`, or `"they/them"` — matches `gender` |
+| `name` | object | `title`, `first`, `last`; title is `Mx` for nonbinary users |
+| `location` | object | `street` (number + name), `city`, `state`, `country`, `postcode`, `coordinates` (latitude + longitude), `timezone` (offset + description); coordinates and timezone are drawn from a per-nationality geographic bounding box |
 | `email` | string | `firstname.lastname@example.com`; non-ASCII characters are transliterated |
 | `login` | object | `uuid`, `username`, `password`, `salt`, `md5`, `sha1`, `sha256` |
 | `registered` | object | `date` (RFC 3339), `age` (years) |
@@ -392,11 +420,11 @@ Fields appear in the canonical order shown above. The `info` block is omitted wh
 | `AU` | TFN | 9-digit Tax File Number |
 | `BR` | CPF | `NNN.NNN.NNN-NN` (validated) |
 | `CA` | SIN | 9-digit Social Insurance Number (Luhn-validated) |
-| `CH` | AVS | `756.XXXX.XXXX.XX` |
+| `CH` | AVS | `756.XXXX.XXXX.XY` where Y is an EAN-13 check digit |
 | `DE` | SVNR | `DDXXXXYYMMGGPPC` format |
 | `DK` | CPR | `DDMMYY-NNNN` |
 | `ES` | DNI | `NNNNNNNL` |
-| `FI` | HETU | `DDMMYYXNNNNC` (personal identity code) |
+| `FI` | HETU | `DDMMYYXNNNNC` (personal identity code, check character validated) |
 | `FR` | INSEE | 13-digit social security number with 2-digit key |
 | `GB` | NINO | `XX NNNNNN X` (National Insurance Number) |
 | `IE` | PPS | `NNNNNNNXA` (post-2013) or `NNNNNNNX` (pre-2013) |
@@ -404,7 +432,7 @@ Fields appear in the canonical order shown above. The `info` block is omitted wh
 | `IR` | — | Empty (`name: ""`, `value: null`) |
 | `MX` | NSS | `NN NN NN NNNN N` (IMSS social security number) |
 | `NL` | BSN | 8-digit citizen service number |
-| `NO` | FN | 11-digit fødselsnummer with check digits |
+| `NO` | FN | 11-digit fødselsnummer with validated check digits |
 | `NZ` | — | Empty (`name: ""`, `value: null`) |
 | `RS` | SID | 9-digit serial ID |
 | `TR` | — | Empty (`name: ""`, `value: null`) |
@@ -413,12 +441,13 @@ Fields appear in the canonical order shown above. The `info` block is omitted wh
 
 #### Nationality-specific postcode formats
 
-Most nationalities generate a 5-digit postcode. Exceptions:
+Most nationalities generate a 5-digit integer postcode. Exceptions:
 
 | Code | Format | Example |
 |------|--------|---------|
 | `AU` | Integer 200–9999 | `2000` |
 | `CA` | Letter-digit-letter space digit-letter-digit | `K1A 0A1` |
+| `CH` | Integer 1000–9999 | `8001` |
 | `NO` | Real postcode drawn from dataset | `0150` |
 
 ---
@@ -495,7 +524,17 @@ event: stats
 data: {"total_requests":1044,"by_nat":{"US":313,"GB":198,"FR":155}}
 ```
 
-Stats are in-memory only unless `MONGODB_URI` is configured. Counts reset on server restart.
+Stats are in-memory only unless `MONGODB_URI` is configured and the `mongodb` Cargo feature is enabled. Counts reset on server restart.
+
+---
+
+## Interactive API docs
+
+The server exposes a [Scalar](https://scalar.com) interactive documentation UI at `/docs`. It renders the full OpenAPI spec, lets you try requests live, and shows example responses for every endpoint and parameter.
+
+```
+http://localhost:3000/docs
+```
 
 ---
 
@@ -513,17 +552,19 @@ randomuser/
 │   │   ├── formats.rs        # JSON / pretty / XML / YAML / CSV serialisers
 │   │   └── nat/
 │   │       ├── mod.rs        # Data loading; inject dispatch; shared helpers
+│   │       ├── geo.rs        # Per-nationality bounding boxes and timezone lists
 │   │       ├── au.rs         # Australia
 │   │       ├── br.rs         # Brazil
 │   │       └── ...           # One file per nationality
 │   ├── stats/
 │   │   ├── mod.rs            # StatEvent, LiveStats, RateLimiter, StatsHandle
-│   │   └── mongo.rs          # Background MongoDB writer task
+│   │   └── mongo.rs          # Background MongoDB writer task (mongodb feature)
 │   └── routes/
 │       ├── api.rs            # AppState; handlers for /api and /api/:version
+│       ├── openapi.rs        # utoipa schema types and Scalar docs router (/docs)
 │       └── stats.rs          # Handlers for /stats and /stats/stream
 ├── tests/
-│   └── api.rs                # 27 integration tests
+│   └── api.rs                # 30 integration tests
 ├── data/                     # Nationality data files (names, cities, etc.)
 │   ├── common/lists/         # Shared: passwords, timezones, titles, usernames
 │   └── <NAT>/lists/          # Per-nationality: first names, last names, cities, states, streets
@@ -534,10 +575,24 @@ randomuser/
 
 ## Differences from the upstream Node.js implementation
 
-This port corrects several bugs present in the original:
+This port corrects several bugs present in the original and adds features not in the original:
 
-1. **FI HETU — invalid date**: The original called `new Date(dob)` where `dob` was a JSON object, producing `Invalid Date`. This port parses the ISO string from `dob.date`.
+1. **Seed UTF-8 safety**: The original JS implementation sliced the seed string by byte index, which is safe in JS (UTF-16 strings). The Rust port ensures slicing occurs on a valid char boundary to avoid panicking on multi-byte UTF-8 seeds of length 18.
 
-2. **FI HETU — wrong day-of-month**: The original used `getDay()` (day of week, 0–6) instead of `getDate()` (day of month, 1–31) when building the HETU date string.
+2. **FI HETU — invalid date**: The original called `new Date(dob)` where `dob` was a JSON object, producing `Invalid Date`. This port parses the ISO string from `dob.date`.
 
-3. **DE / DK / FR — 3-digit year**: The original used JS `getYear()` which returns values like `104` for the year 2004. This port uses `year % 100` to correctly produce a 2-digit year.
+3. **FI HETU — wrong day-of-month**: The original used `getDay()` (day of week, 0–6) instead of `getDate()` (day of month, 1–31) when building the HETU date string.
+
+4. **FI HETU — wrong check character**: The original computed the HETU check character using unpadded day and month values (e.g. `1` for January instead of `01`), producing wrong check characters for days < 10 and months < 10. This port zero-pads both before computing the check.
+
+5. **DE / DK / FR — 3-digit year**: The original used JS `getYear()` which returns values like `104` for the year 2004. This port uses `year % 100` to correctly produce a 2-digit year.
+
+6. **NO FNR — invalid check digits**: The original did not validate that K1 and K2 check digits are in range (must be 0–9; a value of 10 means the NNN is invalid and a new one should be picked). This port retries on out-of-range check digits.
+
+7. **US SSN — unbounded retry loop**: The original could loop indefinitely generating SSNs. This port adds a retry ceiling with a deterministic fallback.
+
+8. **CH AVS — missing check digit**: The original generated both digits of the last group randomly, producing numbers that fail EAN-13 validation. This port computes the correct check digit from the preceding 12 digits.
+
+9. **Geo-accurate coordinates and timezones**: The original drew coordinates and timezone independently at random from global ranges. This port restricts coordinates to a per-nationality WGS 84 bounding box and selects the timezone from a list applicable to that country.
+
+10. **Nonbinary gender and pronouns**: The original supported only male and female. This port adds nonbinary (≈ 5 % when unfiltered) with `they/them` pronouns and `Mx` title.
