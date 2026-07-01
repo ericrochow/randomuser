@@ -7,15 +7,19 @@
 use randomuser::generator::{GenerateOptions, Generator};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data")
 }
 
-fn gen() -> Generator {
-    let mut g = Generator::new("1.4");
-    g.init(&data_dir()).expect("data dir must exist");
-    g
+fn gen() -> &'static Generator {
+    static GEN: OnceLock<Generator> = OnceLock::new();
+    GEN.get_or_init(|| {
+        let mut g = Generator::new("1.4");
+        g.init(&data_dir()).expect("data dir must exist");
+        g
+    })
 }
 
 fn generate(opts: GenerateOptions) -> Value {
@@ -86,13 +90,13 @@ fn fetch_5000_results() {
 }
 
 #[test]
-fn result_count_above_max_gives_1() {
+fn result_count_above_max_clamped_to_max() {
     let v = generate(GenerateOptions {
         results: Some(5001),
         max_results: 5000,
         ..Default::default()
     });
-    assert_eq!(v["results"].as_array().unwrap().len(), 1);
+    assert_eq!(v["results"].as_array().unwrap().len(), 5000);
 }
 
 // ─── Field include/exclude ────────────────────────────────────────────────────
@@ -225,6 +229,60 @@ fn gender_filter_female() {
     });
     for user in v["results"].as_array().unwrap() {
         assert_eq!(user["gender"], "female");
+    }
+}
+
+// ─── Gender / pronouns ────────────────────────────────────────────────────────
+
+#[test]
+fn gender_filter_nonbinary() {
+    let v = generate(GenerateOptions {
+        results: Some(50),
+        gender: Some("nonbinary".to_string()),
+        max_results: 5000,
+        ..Default::default()
+    });
+    for user in v["results"].as_array().unwrap() {
+        assert_eq!(user["gender"], "nonbinary");
+        assert_eq!(user["pronouns"], "they/them");
+        assert_eq!(user["name"]["title"], "Mx");
+    }
+}
+
+#[test]
+fn pronouns_present_for_all_genders() {
+    let v = generate(GenerateOptions {
+        results: Some(200),
+        max_results: 5000,
+        ..Default::default()
+    });
+    for user in v["results"].as_array().unwrap() {
+        let gender = user["gender"].as_str().unwrap();
+        let pronouns = user["pronouns"].as_str().unwrap();
+        let expected = match gender {
+            "male" => "he/him",
+            "female" => "she/her",
+            "nonbinary" => "they/them",
+            g => panic!("unexpected gender value: {g}"),
+        };
+        assert_eq!(pronouns, expected, "gender={gender}");
+    }
+}
+
+#[test]
+fn nonbinary_picture_url_is_valid() {
+    let v = generate(GenerateOptions {
+        results: Some(50),
+        gender: Some("nonbinary".to_string()),
+        max_results: 5000,
+        ..Default::default()
+    });
+    for user in v["results"].as_array().unwrap() {
+        let large = user["picture"]["large"].as_str().unwrap();
+        assert!(
+            large.contains("/portraits/men/") || large.contains("/portraits/women/"),
+            "nonbinary picture URL must use men or women: {large}"
+        );
     }
 }
 
