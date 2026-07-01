@@ -3,6 +3,7 @@ use randomuser::{
     config::Config,
     generator::Generator,
     routes::api::{handle_latest, handle_versioned, AppState},
+    routes::openapi::docs_router,
     routes::stats::{handle_stats_snapshot, handle_stats_stream},
     stats,
 };
@@ -23,17 +24,25 @@ async fn main() {
 
     let config = Config::from_env();
 
+    #[cfg(feature = "mongodb")]
     if config.mongodb_uri.is_some() {
         info!("MongoDB stats enabled");
     } else {
         info!("MongoDB stats disabled (set MONGODB_URI to enable)");
+    }
+    #[cfg(not(feature = "mongodb"))]
+    if config.mongodb_uri.is_some() {
+        tracing::warn!(
+            "MONGODB_URI is set but the 'mongodb' Cargo feature is not compiled in; \
+             rebuild with '--features mongodb' to enable stats persistence"
+        );
     }
     if config.trusted_proxy {
         info!("Trusted-proxy mode enabled: real IP extracted from X-Forwarded-For");
     }
 
     info!("Loading generator data from {:?} …", config.data_dir);
-    let mut gen = Generator::new("1.4");
+    let mut gen = Generator::new(config.latest_version);
     gen.init(&config.data_dir)
         .expect("failed to load data directory");
 
@@ -77,6 +86,7 @@ async fn main() {
         .route("/api/:version", get(handle_versioned))
         .route("/stats", get(handle_stats_snapshot))
         .route("/stats/stream", get(handle_stats_stream))
+        .merge(docs_router())
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(state);

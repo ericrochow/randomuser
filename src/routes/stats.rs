@@ -13,16 +13,39 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use super::api::AppState;
 
-/// `GET /stats` — point-in-time JSON snapshot of accumulated request counts.
+/// Accumulated request statistics.
+///
+/// Returns a point-in-time JSON snapshot of all requests served since startup,
+/// broken down by nationality code.
+#[utoipa::path(
+    get,
+    path = "/stats",
+    responses(
+        (status = 200, description = "Current request statistics",
+         body = crate::stats::StatsSnapshot, content_type = "application/json"),
+    ),
+    tag = "Stats",
+)]
 pub async fn handle_stats_snapshot(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.stats.snapshot())
 }
 
-/// `GET /stats/stream` — Server-Sent Events stream of live stats.
+/// Live request statistics stream (Server-Sent Events).
 ///
-/// Each event carries a JSON object with the same shape as `GET /stats`.
-/// A keep-alive comment is sent every 15 seconds so proxies and browsers
-/// don't close the connection during quiet periods.
+/// Opens a persistent SSE connection. Each event is named `stats` and carries
+/// a JSON payload with the same shape as `GET /stats`, emitted after every
+/// request. A keep-alive comment is sent every 15 seconds.
+///
+/// Consume with `EventSource` in the browser or `curl -N /stats/stream`.
+#[utoipa::path(
+    get,
+    path = "/stats/stream",
+    responses(
+        (status = 200, description = "SSE stream — each `stats` event is a StatsSnapshot JSON object",
+         content_type = "text/event-stream"),
+    ),
+    tag = "Stats",
+)]
 pub async fn handle_stats_stream(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

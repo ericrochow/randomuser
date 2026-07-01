@@ -1,16 +1,20 @@
+#[cfg(feature = "mongodb")]
 pub mod mongo;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
+#[cfg(feature = "mongodb")]
+use tokio::sync::mpsc;
+#[cfg(feature = "mongodb")]
 use tracing::warn;
 
 // ─── Per-request event ────────────────────────────────────────────────────────
@@ -49,10 +53,6 @@ impl Default for LiveStats {
 }
 
 impl LiveStats {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn record(&self, event: &StatEvent) {
         self.total.fetch_add(1, Ordering::Relaxed);
         for nat in &event.nat {
@@ -76,19 +76,29 @@ impl LiveStats {
 }
 
 /// Point-in-time snapshot of aggregated stats (serialisable for JSON + SSE).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct StatsSnapshot {
+    /// Total number of requests served since startup
+    #[schema(example = 4200)]
     pub total_requests: u64,
-    pub by_nat: HashMap<String, u64>,
+    /// Per-nationality breakdown of requests (only nats explicitly requested by callers are counted)
+    pub by_nat: BTreeMap<String, u64>,
 }
 
 // ─── Per-IP rate limiter ──────────────────────────────────────────────────────
+
+/// Hard cap on how many distinct source IPs the rate-limiter map may hold
+/// at once. At ~48 bytes per entry this is ~48 MB worst-case. When the map
+/// reaches this size, expired entries are evicted before inserting a new one,
+/// bounding growth between the scheduled per-window sweeps.
+const MAX_TRACKED_IPS: usize = 1_000_000;
 
 /// Simple fixed-window per-IP rate limiter backed by a DashMap.
 ///
 /// On each call to `check_and_increment`, the request count for the IP is
 /// incremented. If the window has expired, the counter resets first. Returns
-/// `true` if the request is within the configured limit.
+/// `None` if the request is within the configured limit, or `Some(count)` when
+/// the limit has been exceeded.
 ///
 /// Call `evict_expired` periodically (e.g. every `window` seconds) to remove
 /// stale entries and prevent unbounded memory growth.
@@ -108,19 +118,25 @@ impl RateLimiter {
         }
     }
 
-    pub fn check_and_increment(&self, ip: IpAddr) -> bool {
+    /// Increment the counter for `ip` and return `None` if the request is
+    /// within the rate limit, or `Some(count)` with the current counter value
+    /// if the limit has been exceeded. Both the decision and the count are
+    /// returned from a single lock acquisition, avoiding a TOCTOU race between
+    /// a separate `check` and `current_count` call.
+    pub fn check_and_increment(&self, ip: IpAddr) -> Option<u64> {
         let now = Instant::now();
+        // Proactively evict when the map is full so an IP-rotation attack
+        // cannot grow it without bound between scheduled eviction sweeps.
+        if self.map.len() >= MAX_TRACKED_IPS {
+            self.evict_expired();
+        }
         let mut entry = self.map.entry(ip).or_insert((0, now));
         if now.duration_since(entry.1) >= self.window {
             *entry = (1, now);
         } else {
             entry.0 += 1;
         }
-        entry.0 <= self.limit
-    }
-
-    pub fn current_count(&self, ip: IpAddr) -> u64 {
-        self.map.get(&ip).map(|e| e.0).unwrap_or(0)
+        if entry.0 <= self.limit { None } else { Some(entry.0) }
     }
 
     /// Remove entries whose rate window has expired. Spawn a Tokio task that
@@ -136,7 +152,8 @@ impl RateLimiter {
 #[derive(Clone)]
 pub struct StatsHandle {
     live: Arc<LiveStats>,
-    /// Present only when MongoDB is configured.
+    /// Present only when the `mongodb` feature is enabled and MONGODB_URI is set.
+    #[cfg(feature = "mongodb")]
     mongo_tx: Option<mpsc::Sender<StatEvent>>,
     /// Broadcast channel for SSE clients.
     broadcast_tx: broadcast::Sender<StatsSnapshot>,
@@ -149,6 +166,7 @@ impl StatsHandle {
         self.live.record(&event);
         // Ignore send errors — fine if no SSE clients are connected.
         let _ = self.broadcast_tx.send(self.live.snapshot());
+        #[cfg(feature = "mongodb")]
         if let Some(tx) = &self.mongo_tx {
             if tx.try_send(event).is_err() {
                 warn!("MongoDB stats channel full; dropping event");
@@ -172,11 +190,15 @@ impl StatsHandle {
 /// Build a StatsHandle and, if `mongodb_uri` is Some, spawn the background
 /// writer task. Must be called inside a Tokio runtime.
 pub fn create(mongodb_uri: Option<&str>) -> StatsHandle {
-    let live = Arc::new(LiveStats::new());
+    let live = Arc::new(LiveStats::default());
     // Capacity 64: if all clients are slow they'll miss some events, which
     // is fine — we don't want to backpressure request handlers.
     let (broadcast_tx, _) = broadcast::channel(64);
 
+    #[cfg(not(feature = "mongodb"))]
+    let _ = mongodb_uri;
+
+    #[cfg(feature = "mongodb")]
     let mongo_tx = mongodb_uri.map(|uri| {
         // Bounded channel: drops events with a warning rather than growing
         // without bound when MongoDB is slow.
@@ -188,6 +210,7 @@ pub fn create(mongodb_uri: Option<&str>) -> StatsHandle {
 
     StatsHandle {
         live,
+        #[cfg(feature = "mongodb")]
         mongo_tx,
         broadcast_tx,
     }
@@ -216,7 +239,7 @@ mod tests {
 
     #[test]
     fn live_stats_accumulate() {
-        let stats = LiveStats::new();
+        let stats = LiveStats::default();
         stats.record(&dummy_event("US"));
         stats.record(&dummy_event("US"));
         stats.record(&dummy_event("GB"));
@@ -239,21 +262,31 @@ mod tests {
     fn rate_limiter_allows_within_limit() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let limiter = RateLimiter::new(3, Duration::from_secs(60));
-        assert!(limiter.check_and_increment(ip));
-        assert!(limiter.check_and_increment(ip));
-        assert!(limiter.check_and_increment(ip));
-        assert!(!limiter.check_and_increment(ip)); // 4th request exceeds limit
+        assert!(limiter.check_and_increment(ip).is_none());
+        assert!(limiter.check_and_increment(ip).is_none());
+        assert!(limiter.check_and_increment(ip).is_none());
+        assert!(limiter.check_and_increment(ip).is_some()); // 4th request exceeds limit
+    }
+
+    #[test]
+    fn rate_limiter_returns_count_when_exceeded() {
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        assert!(limiter.check_and_increment(ip).is_none());
+        assert!(limiter.check_and_increment(ip).is_none());
+        let count = limiter.check_and_increment(ip).expect("3rd request must be denied");
+        assert_eq!(count, 3, "returned count must equal the current counter");
     }
 
     #[test]
     fn rate_limiter_resets_after_window() {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let limiter = RateLimiter::new(1, Duration::from_millis(1));
-        assert!(limiter.check_and_increment(ip));
-        assert!(!limiter.check_and_increment(ip)); // over limit
+        assert!(limiter.check_and_increment(ip).is_none());
+        assert!(limiter.check_and_increment(ip).is_some()); // over limit
 
         std::thread::sleep(Duration::from_millis(5));
-        assert!(limiter.check_and_increment(ip)); // window reset
+        assert!(limiter.check_and_increment(ip).is_none()); // window reset
     }
 
     #[test]
@@ -261,9 +294,9 @@ mod tests {
         let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
         let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
         let limiter = RateLimiter::new(1, Duration::from_secs(60));
-        assert!(limiter.check_and_increment(ip1));
-        assert!(!limiter.check_and_increment(ip1));
-        assert!(limiter.check_and_increment(ip2)); // ip2 has its own counter
+        assert!(limiter.check_and_increment(ip1).is_none());
+        assert!(limiter.check_and_increment(ip1).is_some());
+        assert!(limiter.check_and_increment(ip2).is_none()); // ip2 has its own counter
     }
 
     #[test]

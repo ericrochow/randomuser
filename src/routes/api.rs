@@ -25,39 +25,105 @@ pub struct AppState {
     pub trusted_proxy: bool,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ApiQuery {
+    /// Number of results to return. Clamped to `[1, max_results]` (server default 5 000).
+    #[param(example = 10, minimum = 1)]
     pub results: Option<usize>,
+    /// Seed for reproducible output. The same seed + page always produces the same users.
+    #[param(example = "abc123")]
     pub seed: Option<String>,
+    /// Page number for paginated, seeded requests (default 1).
+    #[param(example = 1, minimum = 1)]
     pub page: Option<u32>,
+    /// Filter results by gender. Accepted values: `male`, `female`, `nonbinary`.
+    #[param(example = "male")]
     pub gender: Option<String>,
+    /// Comma-separated nationality codes to restrict results to, e.g. `US,FR,DE`.
+    /// Accepts AU BR CA CH DE DK ES FI FR GB IE IN IR MX NL NO NZ RS TR UA US.
+    #[param(example = "US,GB")]
     pub nat: Option<String>,
+    /// Comma-separated field names to include. All fields are returned when omitted.
+    #[param(example = "name,email,location")]
     pub inc: Option<String>,
+    /// Comma-separated field names to exclude.
+    #[param(example = "login,picture")]
     pub exc: Option<String>,
+    /// Output format. One of `json` (default), `pretty`, `xml`, `yaml`, `csv`.
+    #[param(example = "json")]
     pub fmt: Option<String>,
-    /// Alias for fmt
+    /// Alias for `fmt`.
     pub format: Option<String>,
+    /// Password character-set spec. Comma-separated tokens from
+    /// `upper` `lower` `number` `special`, optionally followed by a length range `8-16`.
+    #[param(example = "upper,lower,number,8-16")]
     pub password: Option<String>,
-    /// Presence of key (any value) enables lego mode
+    /// Set to any value to request LEGO-themed user pictures.
     pub lego: Option<String>,
-    /// Presence enables download mode
+    /// Set to any value to trigger a file-download (`Content-Disposition: attachment`) response.
     pub dl: Option<String>,
+    /// Alias for `dl`.
     pub download: Option<String>,
-    /// JSONP callback
+    /// JSONP callback function name. Must be a valid dot-separated JS identifier (e.g. `MyApp.cb`).
+    #[param(example = "MyApp.onData")]
     pub callback: Option<String>,
-    /// Presence removes info block
+    /// Set to any value to omit the `info` block from the response.
     pub noinfo: Option<String>,
 }
 
+/// Generate random user data.
+///
+/// Returns one or more randomly generated user profiles. All parameters are optional.
+/// Use `seed` + `page` for reproducible, paginated datasets. The `fmt` parameter
+/// switches the response body between JSON, XML, YAML, and CSV — only JSON is shown here.
+#[utoipa::path(
+    get,
+    path = "/api",
+    params(ApiQuery),
+    responses(
+        (status = 200, description = "Random user data in the requested format",
+         body = crate::routes::openapi::RandomUserResponse, content_type = "application/json"),
+        (status = 400, description = "Invalid JSONP callback name",
+         body = crate::routes::openapi::ErrorResponse),
+        (status = 429, description = "Rate limit exceeded",
+         body = crate::routes::openapi::ErrorResponse),
+    ),
+    tag = "Generate",
+)]
 pub async fn handle_latest(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(q): Query<ApiQuery>,
 ) -> Response {
-    handle(None, state, addr, headers, q).await
+    handle(state, addr, headers, q).await
 }
 
+/// Generate random user data (versioned endpoint).
+///
+/// Identical to `GET /api` but requires an explicit version in the path.
+/// Returns 404 if the version does not match the running API version (`1.4`).
+#[utoipa::path(
+    get,
+    path = "/api/{version}",
+    params(
+        ApiQuery,
+        ("version" = String, Path, description = "API version — only `1.4` is currently valid",
+         example = "1.4"),
+    ),
+    responses(
+        (status = 200, description = "Random user data in the requested format",
+         body = crate::routes::openapi::RandomUserResponse, content_type = "application/json"),
+        (status = 400, description = "Invalid JSONP callback name",
+         body = crate::routes::openapi::ErrorResponse),
+        (status = 404, description = "Unknown API version",
+         body = crate::routes::openapi::ErrorResponse),
+        (status = 429, description = "Rate limit exceeded",
+         body = crate::routes::openapi::ErrorResponse),
+    ),
+    tag = "Generate",
+)]
 pub async fn handle_versioned(
     Path(version): Path<String>,
     State(state): State<AppState>,
@@ -72,11 +138,10 @@ pub async fn handle_versioned(
         )
             .into_response();
     }
-    handle(Some(&version), state, addr, headers, q).await
+    handle(state, addr, headers, q).await
 }
 
 async fn handle(
-    _version: Option<&str>,
     state: AppState,
     addr: SocketAddr,
     headers: HeaderMap,
@@ -84,8 +149,7 @@ async fn handle(
 ) -> Response {
     let ip = real_ip(&headers, addr.ip(), state.trusted_proxy);
 
-    if !state.limiter.check_and_increment(ip) {
-        let count = state.limiter.current_count(ip);
+    if let Some(count) = state.limiter.check_and_increment(ip) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({
@@ -148,7 +212,7 @@ async fn handle(
     // Fire-and-forget — never blocks the response.
     state.stats.record(StatEvent {
         ts: Utc::now(),
-        version: "1.4".to_string(),
+        version: state.generator.version().to_string(),
         // Use the count the generator actually produced rather than re-deriving it.
         results: out.resolved_results,
         seed: stat_seed,
