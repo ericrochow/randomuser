@@ -21,7 +21,7 @@ const CONSTANT_TIME: i64 = 1_653_344_189;
 
 /// All user fields in canonical output order.
 const ORIGINAL_FIELDS: &[&str] = &[
-    "gender", "name", "location", "email", "login", "registered", "dob", "phone",
+    "gender", "pronouns", "name", "location", "email", "login", "registered", "dob", "phone",
     "cell", "id", "picture", "nat",
 ];
 
@@ -55,14 +55,20 @@ pub struct GenerateOptions {
 }
 
 /// Returns true if `name` is safe to embed as a JSONP callback identifier.
-/// Accepts ASCII letters, digits, `_`, `$`, and `.` (for namespaced callbacks
-/// like `MyApp.callback`), up to 128 characters.
+///
+/// Valid callbacks are dot-separated JavaScript identifiers (e.g. `MyApp.cb`).
+/// Each segment must be non-empty, start with `[a-zA-Z_$]`, and contain only
+/// `[a-zA-Z0-9_$]`. Leading digits or dots (e.g. `1abc`, `.foo`) produce
+/// syntactically invalid JSONP and are rejected here so callers receive a `400`
+/// instead of a silent client-side failure.
 pub fn is_safe_callback(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+        && name.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        })
 }
 
 impl Generator {
@@ -90,8 +96,9 @@ impl Generator {
     pub fn generate(&self, opts: GenerateOptions) -> FormatOutput {
         let max = if opts.max_results == 0 { 5000 } else { opts.max_results };
 
-        // Resolve result count
-        let result_count = opts.results.filter(|&n| n >= 1 && n <= max).unwrap_or(1);
+        // Resolve result count: clamp to [1, max] so callers requesting more
+        // than max still get a full max-sized response rather than 1 result.
+        let result_count = opts.results.map(|n| n.clamp(1, max)).unwrap_or(1);
 
         // Resolve page
         let page = opts.page.unwrap_or(1).max(1);
@@ -104,7 +111,7 @@ impl Generator {
         let gender_filter = opts.gender.as_deref().map(|g| g.to_lowercase());
         let gender_filter = gender_filter
             .as_deref()
-            .filter(|g| *g == "male" || *g == "female");
+            .filter(|g| *g == "male" || *g == "female" || *g == "nonbinary");
 
         // Resolve nat list
         let all_nats = self.datasets.nat_codes();
@@ -131,10 +138,7 @@ impl Generator {
             rand::thread_rng()
                 .sample_iter(Alphanumeric)
                 .take(16)
-                .map(|b| {
-                    let c = b as char;
-                    if c.is_ascii_alphanumeric() { c.to_lowercase().next().unwrap() } else { '0' }
-                })
+                .map(|b| (b as char).to_ascii_lowercase())
                 .collect()
         });
 
@@ -145,7 +149,7 @@ impl Generator {
         // Generate users
         let mut results: Vec<Map<String, Value>> = Vec::with_capacity(result_count);
         for _ in 0..result_count {
-            let user = self.gen_one_user(&mut prng, &inc, gender_filter, &nat_filter, &opts.password);
+            let user = self.gen_one_user(&mut prng, &inc, gender_filter, &nat_filter, &all_nats, &opts.password);
             results.push(user);
         }
 
@@ -190,9 +194,9 @@ impl Generator {
         inc: &[String],
         gender_filter: Option<&str>,
         nat_filter: &Option<Vec<String>>,
+        all_nats: &[String],
         password_spec: &Option<String>,
     ) -> Map<String, Value> {
-        let all_nats = self.datasets.nat_codes();
 
         // Pick nationality
         let nat = if opts_lego(nat_filter) {
@@ -204,13 +208,16 @@ impl Generator {
             }
         };
 
-        // Pick gender
+        // Pick gender.
+        // Distribution when no filter: 2/40 = 5% nonbinary, 19/40 = 47.5% each
+        // for male and female.
         let gender = match gender_filter {
             Some(g) => g.to_string(),
-            None => {
-                let choices = ["male", "female"];
-                prng.random_item(&choices).to_string()
-            }
+            None => match prng.range(0, 39) {
+                0..=1 => "nonbinary".to_string(),
+                2..=20 => "male".to_string(),
+                _ => "female".to_string(),
+            },
         };
 
         // Pick name
@@ -223,6 +230,16 @@ impl Generator {
             user.insert("gender".to_string(), json!(gender));
         }
 
+        // ── pronouns ───────────────────────────────────────────────────────
+        if inc_has(inc, "pronouns") {
+            let pronouns = match gender.as_str() {
+                "male" => "he/him",
+                "female" => "she/her",
+                _ => "they/them",
+            };
+            user.insert("pronouns".to_string(), json!(pronouns));
+        }
+
         // ── name ───────────────────────────────────────────────────────────
         if inc_has(inc, "name") {
             // FR has its own title list; otherwise use common
@@ -231,10 +248,10 @@ impl Generator {
             } else {
                 self.datasets.common_list("title")
             };
-            let title = if gender == "male" {
-                "Mr".to_string()
-            } else {
-                prng.random_item(title_list).clone()
+            let title = match gender.as_str() {
+                "male" => "Mr".to_string(),
+                "nonbinary" => "Mx".to_string(),
+                _ => prng.random_item(title_list).clone(),
             };
             user.insert(
                 "name".to_string(),
@@ -249,10 +266,11 @@ impl Generator {
             let street_name = prng.random_item(self.datasets.nat_list(&nat, "street")).clone();
             let street_number = prng.range(1, 9999);
             let postcode = prng.range(10_000, 99_999); // default; inject may override
-            let tz_str = prng.random_item(self.datasets.common_list("timezones")).clone();
-            let timezone: Value = serde_json::from_str(&tz_str).unwrap_or(json!(null));
-            let lat = prng.gen_latitude();
-            let lon = prng.gen_longitude();
+            let (lat, lon, timezone) = nat::geo::gen_location(
+                &nat,
+                prng,
+                self.datasets.common_list("timezones"),
+            );
 
             user.insert(
                 "location".to_string(),
@@ -313,12 +331,14 @@ impl Generator {
         }
 
         // ── registered ─────────────────────────────────────────────────────
+        let mut reg_dt_for_assert: Option<DateTime<Utc>> = None;
         if inc_has(inc, "registered") {
             let reg_ms = prng.range(1_016_688_461_000, CONSTANT_TIME * 1000);
             let reg_dt = Utc
                 .timestamp_millis_opt(reg_ms)
                 .single()
                 .unwrap_or_else(Utc::now);
+            reg_dt_for_assert = Some(reg_dt);
             let age_years = age_years(reg_dt);
             user.insert(
                 "registered".to_string(),
@@ -333,6 +353,12 @@ impl Generator {
                 .timestamp_millis_opt(dob_ms)
                 .single()
                 .unwrap_or_else(Utc::now);
+            // DOB max ≈ May 2001, registered min ≈ March 2002, so dob always
+            // precedes registered. A debug_assert catches if the constants drift.
+            debug_assert!(
+                reg_dt_for_assert.map_or(true, |r| dob_dt < r),
+                "dob must precede registration date"
+            );
             let age_years = age_years(dob_dt);
             user.insert(
                 "dob".to_string(),
@@ -342,28 +368,26 @@ impl Generator {
 
         // ── picture (set before inject; inject will reorder it after id) ───
         if inc_has(inc, "picture") {
-            let gender_text = if gender == "male" { "men" } else { "women" };
             let is_lego = nat == "LEGO";
-            let id_max: i64 = if is_lego {
-                9
-            } else if gender == "male" {
-                99
+            // For nonbinary, choose a photo set via the seeded PRNG so output
+            // remains deterministic. Photo IDs: men 0-99, women 0-96, lego 0-9.
+            let (g_dir, id_max): (&str, i64) = if is_lego {
+                ("lego", 9)
             } else {
-                96
+                match gender.as_str() {
+                    "male" => ("men", 99),
+                    "female" => ("women", 96),
+                    _ => if prng.range(0, 1) == 0 { ("men", 99) } else { ("women", 96) },
+                }
             };
             let pic_id = prng.range(0, id_max);
-            let (g_dir, base_id) = if is_lego {
-                ("lego", pic_id)
-            } else {
-                (gender_text, pic_id)
-            };
             let base = "https://randomuser.me/api/";
             user.insert(
                 "picture".to_string(),
                 json!({
-                    "large": format!("{}portraits/{}/{}.jpg", base, g_dir, base_id),
-                    "medium": format!("{}portraits/med/{}/{}.jpg", base, g_dir, base_id),
-                    "thumbnail": format!("{}portraits/thumb/{}/{}.jpg", base, g_dir, base_id)
+                    "large": format!("{}portraits/{}/{}.jpg", base, g_dir, pic_id),
+                    "medium": format!("{}portraits/med/{}/{}.jpg", base, g_dir, pic_id),
+                    "thumbnail": format!("{}portraits/thumb/{}/{}.jpg", base, g_dir, pic_id)
                 }),
             );
         }
@@ -380,10 +404,16 @@ impl Generator {
     }
 
     fn random_name(&self, gender: &str, nat: &str, prng: &mut Prng) -> (String, String) {
-        let first_list = if gender == "male" {
-            self.datasets.nat_list(nat, "male_first")
-        } else {
-            self.datasets.nat_list(nat, "female_first")
+        let first_list = match gender {
+            "male" => self.datasets.nat_list(nat, "male_first"),
+            "female" => self.datasets.nat_list(nat, "female_first"),
+            // Nonbinary: draw from either name list via the seeded PRNG so
+            // output is deterministic and names aren't constrained by gender.
+            _ => if prng.range(0, 1) == 0 {
+                self.datasets.nat_list(nat, "male_first")
+            } else {
+                self.datasets.nat_list(nat, "female_first")
+            },
         };
         let first = if first_list.is_empty() {
             "Jane".to_string()
@@ -418,11 +448,13 @@ impl Generator {
         let sections: Vec<&str> = spec.split(',').collect();
         let last_section = sections.last().copied().unwrap_or("");
 
-        // Collect requested charsets (deduped)
+        // Collect requested charsets, deduplicating by charset name so that
+        // repeating a token (e.g. "upper,upper,lower") never double-adds chars.
         let mut charset = String::new();
+        let mut added = std::collections::HashSet::new();
         for &s in &sections {
-            if let Some((_, chars)) = charsets.iter().find(|(name, _)| *name == s) {
-                if !charset.contains(chars) {
+            if let Some((name, chars)) = charsets.iter().find(|(n, _)| *n == s) {
+                if added.insert(*name) {
                     charset.push_str(chars);
                 }
             }
@@ -487,7 +519,7 @@ fn build_inc(inc_param: Option<&str>, exc_param: Option<&str>) -> Vec<String> {
 
 fn parse_length(s: &str) -> (usize, usize) {
     let clamp = |n: usize| n.clamp(1, 64);
-    if let Some(idx) = s.find('-') {
+    if let Some(idx) = s.find('-').filter(|&i| i > 0) {
         let lo: usize = s[..idx].parse().unwrap_or(8);
         let hi: usize = s[idx + 1..].parse().unwrap_or(64);
         let lo = clamp(lo);
@@ -691,15 +723,17 @@ mod tests {
     }
 
     #[test]
-    fn results_capped_at_max() {
+    fn results_clamped_to_max() {
         let g = make_generator();
+        // Requesting more than max_results should return exactly max_results,
+        // not 1 (old silent-default behaviour).
         let out = g.generate(GenerateOptions {
             results: Some(5001),
             max_results: 5000,
             ..Default::default()
         });
         let v: Value = serde_json::from_str(&out.body).unwrap();
-        assert_eq!(v["results"].as_array().unwrap().len(), 1);
+        assert_eq!(v["results"].as_array().unwrap().len(), 5000);
     }
 
     #[test]
@@ -741,6 +775,104 @@ mod tests {
     }
 
     #[test]
+    fn pronouns_match_gender() {
+        let g = make_generator();
+        // Test all three genders deterministically.
+        for (gender_val, expected_pronouns) in [
+            ("male", "he/him"),
+            ("female", "she/her"),
+            ("nonbinary", "they/them"),
+        ] {
+            let out = g.generate(GenerateOptions {
+                results: Some(20),
+                gender: Some(gender_val.to_string()),
+                max_results: 5000,
+                ..Default::default()
+            });
+            let v: Value = serde_json::from_str(&out.body).unwrap();
+            for user in v["results"].as_array().unwrap() {
+                assert_eq!(
+                    user["pronouns"].as_str().unwrap(),
+                    expected_pronouns,
+                    "gender={gender_val} should have pronouns={expected_pronouns}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonbinary_title_is_mx() {
+        let g = make_generator();
+        let out = g.generate(GenerateOptions {
+            results: Some(20),
+            gender: Some("nonbinary".to_string()),
+            max_results: 5000,
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        for user in v["results"].as_array().unwrap() {
+            assert_eq!(
+                user["name"]["title"].as_str().unwrap(),
+                "Mx",
+                "nonbinary title must be Mx"
+            );
+        }
+    }
+
+    #[test]
+    fn nonbinary_appears_in_large_batch() {
+        let g = make_generator();
+        let out = g.generate(GenerateOptions {
+            results: Some(500),
+            max_results: 5000,
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        let nb_count = v["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|u| u["gender"] == "nonbinary")
+            .count();
+        // At 5% expected rate over 500 users we'd expect ~25. A zero count
+        // would indicate the selection path is broken. Allow a wide band.
+        assert!(nb_count > 0, "expected some nonbinary users in 500 results, got 0");
+    }
+
+    #[test]
+    fn pronouns_excluded_by_exc_filter() {
+        let g = make_generator();
+        let out = g.generate(GenerateOptions {
+            results: Some(10),
+            exc: Some("pronouns".to_string()),
+            max_results: 5000,
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        for user in v["results"].as_array().unwrap() {
+            assert!(user.get("pronouns").is_none(), "pronouns must be excluded");
+        }
+    }
+
+    #[test]
+    fn pronouns_only_returned_when_inc_specified() {
+        let g = make_generator();
+        let out = g.generate(GenerateOptions {
+            results: Some(10),
+            inc: Some("pronouns,gender".to_string()),
+            max_results: 5000,
+            ..Default::default()
+        });
+        let v: Value = serde_json::from_str(&out.body).unwrap();
+        for user in v["results"].as_array().unwrap() {
+            let keys: Vec<&str> = user.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            assert_eq!(sorted, vec!["gender", "pronouns"], "got keys: {keys:?}");
+        }
+    }
+
+    #[test]
     fn build_inc_respects_exc() {
         let inc = build_inc(None, Some("picture,login"));
         assert!(!inc.contains(&"picture".to_string()));
@@ -753,5 +885,28 @@ mod tests {
         let inc = build_inc(Some("email,fakeField"), None);
         assert!(inc.contains(&"email".to_string()));
         assert!(!inc.contains(&"fakefield".to_string()));
+    }
+
+    #[test]
+    fn is_safe_callback_accepts_valid_identifiers() {
+        assert!(is_safe_callback("callback"));
+        assert!(is_safe_callback("MyApp"));
+        assert!(is_safe_callback("_cb"));
+        assert!(is_safe_callback("$"));
+        assert!(is_safe_callback("MyApp.onData"));
+        assert!(is_safe_callback("a.b.c"));
+    }
+
+    #[test]
+    fn is_safe_callback_rejects_invalid() {
+        assert!(!is_safe_callback(""));           // empty
+        assert!(!is_safe_callback("1abc"));       // digit-leading
+        assert!(!is_safe_callback(".foo"));       // leading dot → empty first segment
+        assert!(!is_safe_callback("foo."));       // trailing dot → empty last segment
+        assert!(!is_safe_callback("foo..bar"));   // consecutive dots → empty segment
+        assert!(!is_safe_callback("foo.1bar"));   // digit-leading segment
+        assert!(!is_safe_callback("foo;bar"));    // injection character
+        assert!(!is_safe_callback("foo(bar)"));   // injection characters
+        assert!(!is_safe_callback(&"a".repeat(129))); // over length limit
     }
 }
