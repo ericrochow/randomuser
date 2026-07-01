@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use serde_json::{Map, Value};
 
 pub struct FormatOutput {
@@ -70,8 +71,42 @@ pub fn format_yaml(resp: &ApiResponse) -> FormatOutput {
     }
 }
 
+/// Sanitise a string so it is a valid XML element name.
+///
+/// XML names must start with a letter or '_' and contain only letters, digits,
+/// '_', '-', or '.'. Characters outside that set (e.g. '[', ']' produced by
+/// the CSV flattener for array-index keys) are replaced with '_'.
+///
+/// Returns `Cow::Borrowed(name)` when no substitution is needed, avoiding any
+/// heap allocation for the common case where field names are already valid.
+fn sanitize_xml_tag(name: &str) -> Cow<'_, str> {
+    if name.is_empty() {
+        return Cow::Owned("_".to_string());
+    }
+    let needs_fix = name.chars().enumerate().any(|(i, c)| {
+        if i == 0 { !c.is_ascii_alphabetic() && c != '_' }
+        else { !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') }
+    });
+    if !needs_fix {
+        return Cow::Borrowed(name);
+    }
+    let mut out = String::with_capacity(name.len());
+    for (i, c) in name.chars().enumerate() {
+        if i == 0 && !c.is_ascii_alphabetic() && c != '_' {
+            out.push('_');
+        } else if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Serialize a JSON Value recursively to XML elements under `parent_tag`.
 fn value_to_xml(tag: &str, value: &Value, out: &mut String) {
+    let sanitized = sanitize_xml_tag(tag);
+    let tag: &str = &sanitized;
     match value {
         Value::Object(map) => {
             out.push('<');

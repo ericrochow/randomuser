@@ -14,8 +14,9 @@ use serde_json::{json, Map, Value};
 /// The original inject has two bugs we fix here:
 ///   1. Used `getDay()` (weekday) instead of `getDate()` (day of month).
 ///   2. Used `new Date(dob)` where dob was an object, giving Invalid Date.
+const CHECKSUM: &[u8] = b"0123456789ABCDEFHJKLMNPRSTUVWXY";
+
 fn gen_hetu(dob: chrono::NaiveDate, gender: &str, prng: &mut Prng) -> String {
-    const CHECKSUM: &[u8] = b"0123456789ABCDEFHJKLMNPRSTUVWXY";
 
     let day = dob.day();
     let month = dob.month();
@@ -40,7 +41,8 @@ fn gen_hetu(dob: chrono::NaiveDate, gender: &str, prng: &mut Prng) -> String {
     };
     let nnn = format!("{}{}", prng.random_chars(3, 2), last_digit);
 
-    let check_input: u32 = format!("{}{}{:02}{}", day, month, year, nnn)
+    // HETU check: 9-digit number DDMMYYNNN — all fields must be zero-padded.
+    let check_input: u32 = format!("{:02}{:02}{:02}{}", day, month, year, nnn)
         .parse()
         .unwrap_or(0);
     let cc = CHECKSUM[(check_input % 31) as usize] as char;
@@ -120,6 +122,25 @@ mod tests {
         let dob_2005 = chrono::NaiveDate::from_ymd_opt(2005, 1, 1).unwrap();
         let h2 = gen_hetu(dob_2005, "female", &mut prng);
         assert_eq!(&h2[6..7], "A");
+    }
+
+    #[test]
+    fn hetu_check_char_correct_for_single_digit_day_and_month() {
+        // day=1, month=6 — previously the check was computed from "1685NNN"
+        // (7 chars) instead of "010685NNN" (9 chars), giving the wrong char.
+        let dob = chrono::NaiveDate::from_ymd_opt(1985, 6, 1).unwrap();
+        let mut prng = Prng::new();
+        prng.seed_from_str("fi_pad", 1);
+        let h = gen_hetu(dob, "male", &mut prng);
+        // Verify the check character by recomputing it from the HETU string.
+        let digits_str = format!("{}{}", &h[..6], &h[7..10]);
+        let check_num: u32 = digits_str.parse().unwrap();
+        let expected_cc = CHECKSUM[(check_num % 31) as usize] as char;
+        assert_eq!(
+            h.chars().last().unwrap(),
+            expected_cc,
+            "check char wrong for single-digit day/month HETU: {h}"
+        );
     }
 
     #[test]

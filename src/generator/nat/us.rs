@@ -32,7 +32,7 @@ fn check_ssn(ssn: &str) -> bool {
 }
 
 fn gen_ssn(prng: &mut Prng) -> String {
-    loop {
+    for _ in 0..200 {
         let ssn = format!(
             "{}-{}-{}",
             prng.random_chars(3, 3),
@@ -43,6 +43,7 @@ fn gen_ssn(prng: &mut Prng) -> String {
             return ssn;
         }
     }
+    "001-01-0001".to_string()
 }
 
 pub fn inject(inc: &[String], user: &mut Map<String, Value>, prng: &mut Prng) {

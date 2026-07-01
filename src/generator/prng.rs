@@ -25,7 +25,7 @@ impl Prng {
     ///   integer = parseInt(md5(seed).hex[..8], 16)
     ///   mersenne.seed(integer)
     pub fn seed_from_str(&mut self, seed: &str, page: u32) {
-        let s = if seed.len() == 18 { &seed[..16] } else { seed };
+        let s = if seed.len() == 18 { seed.get(..16).unwrap_or(seed) } else { seed };
         let with_page = if page != 1 {
             format!("{}{}", s, page)
         } else {

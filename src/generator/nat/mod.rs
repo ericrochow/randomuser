@@ -6,6 +6,7 @@ use std::{
     path::Path,
 };
 
+pub mod geo;
 pub mod au;
 pub mod br;
 pub mod ca;
@@ -64,7 +65,7 @@ impl NatDatasets {
         Ok(ds)
     }
 
-    pub fn nat_list<'a>(&'a self, nat: &str, key: &str) -> &'a [String] {
+    pub fn nat_list(&self, nat: &str, key: &str) -> &[String] {
         self.by_nat
             .get(nat)
             .and_then(|m| m.get(key))
@@ -72,7 +73,7 @@ impl NatDatasets {
             .unwrap_or(&[])
     }
 
-    pub fn common_list<'a>(&'a self, key: &str) -> &'a [String] {
+    pub fn common_list(&self, key: &str) -> &[String] {
         self.common.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
@@ -88,6 +89,23 @@ impl NatDatasets {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("required common list '{}' is missing or empty", key),
+                ));
+            }
+        }
+
+        // Verify that timezone entries are valid JSON with the expected shape so
+        // that the LEGO fallback path never silently emits `"timezone": null`.
+        if let Some(sample) = self.common_list("timezones").first() {
+            let parsed: Value = serde_json::from_str(sample).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("timezones.txt: entry is not valid JSON: {e}"),
+                )
+            })?;
+            if !parsed["offset"].is_string() || !parsed["description"].is_string() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "timezones.txt: entries must have string 'offset' and 'description' fields",
                 ));
             }
         }
